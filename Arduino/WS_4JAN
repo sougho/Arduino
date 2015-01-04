@@ -36,27 +36,33 @@ float altitude; //Altitude
 float humidity;
 float dht_temp;
 
-float max_temp;
+float max_temp = 0;
 long max_t_time;
 
-float min_temp;
+float min_temp = 99;
 long min_t_time;
 
-float max_press;
+float max_press = 0;
 long max_p_time;
 
-float min_press;
+float min_press = 2000;
 long min_p_time;
 
-float min_humidity;
+float min_humidity = 100;
 long min_h_time;
 
-float max_humidity;
+float max_humidity = 0;
 long max_h_time;
 
 // For Trending
 float press_mov_avg = 0; // Mov Av of Pressure
 float alpha = 0.9; // For expo MA
+unsigned char press_trend;
+
+#define MAX_PRESS_HISTORY 5
+
+float past_pressure_values [MAX_PRESS_HISTORY];
+
 // Variables for state management
 // See comment for timer handlers
 boolean to_read = true;
@@ -123,11 +129,14 @@ char curr_alt_setting[5] = {
 ;
 int curr_alt;
 float curr_alt_offset;
+
+////////////////// Functions //////////////////////////////////////////
+
 void change_state(int this_input) {
     HANDLER_FN_TYPE f = state_entry_table[current_state][this_input].action;
     if (f != 0) f();
     if (state_entry_table[current_state][this_input].next_state != -1)
-    current_state = state_entry_table[current_state][this_input].next_state;
+      current_state = state_entry_table[current_state][this_input].next_state;
 }
 // POPULATE State Table
 void populate_state_table() {
@@ -143,6 +152,8 @@ void populate_state_table() {
         state_display_fn_array[i] = display_prod_info;
     }
     // State table entries
+    // Action functiones are called after each state transition
+    
     state_entry_table[DISPLAYING_PRESSURE][BUTTON_1_SHORT].next_state = DISPLAYING_HEIGHT;
     state_entry_table[DISPLAYING_PRESSURE][BUTTON_1_SHORT].action = toggleDisplayType;
     state_entry_table[DISPLAYING_HEIGHT][BUTTON_1_SHORT].next_state = DISPLAYING_PRESSURE;
@@ -165,16 +176,49 @@ void populate_state_table() {
     state_entry_table[DISPLAYING_HEIGHT][BUTTON_2_SHORT].action = swtch_rel_abs_alt;
     state_entry_table[DISPLAYING_HEIGHT][BUTTON_2_LONG].next_state = DISPLAYING_HEIGHT;
     state_entry_table[DISPLAYING_HEIGHT][BUTTON_2_LONG].action = set_alt_offset;
+    
     state_entry_table[DISPLAYING_PRESSURE][BUTTON_2_SHORT].next_state = DISPLAYING_MAX_P;
     state_entry_table[DISPLAYING_PRESSURE][BUTTON_2_SHORT].action = disp_max_p;
-    state_entry_table[DISPLAYING_MAX_P][BUTTON_2_SHORT].next_state = DISPLAYING_PRESSURE;
-    state_entry_table[DISPLAYING_MAX_P][BUTTON_2_SHORT].action = set_disp_to_press;
+    state_entry_table[DISPLAYING_MAX_P][BUTTON_2_SHORT].next_state = DISPLAYING_MIN_P;
+    state_entry_table[DISPLAYING_MAX_P][BUTTON_2_SHORT].action = disp_min_p;
+    state_entry_table[DISPLAYING_MAX_P][BUTTON_1_SHORT].next_state = DISPLAYING_PRESSURE;
+    state_entry_table[DISPLAYING_MAX_P][BUTTON_1_SHORT].action = set_disp_to_press;
+    state_entry_table[DISPLAYING_MIN_P][BUTTON_2_SHORT].next_state = DISPLAYING_MAX_T;
+    state_entry_table[DISPLAYING_MIN_P][BUTTON_2_SHORT].action = disp_max_t;
+    state_entry_table[DISPLAYING_MIN_P][BUTTON_1_SHORT].next_state = DISPLAYING_PRESSURE;
+    state_entry_table[DISPLAYING_MIN_P][BUTTON_1_SHORT].action = set_disp_to_press;
+    state_entry_table[DISPLAYING_MAX_T][BUTTON_2_SHORT].next_state = DISPLAYING_MIN_T;
+    state_entry_table[DISPLAYING_MAX_T][BUTTON_2_SHORT].action = disp_min_t;
+    state_entry_table[DISPLAYING_MAX_T][BUTTON_1_SHORT].next_state = DISPLAYING_PRESSURE;
+    state_entry_table[DISPLAYING_MAX_T][BUTTON_1_SHORT].action = set_disp_to_press;
+    state_entry_table[DISPLAYING_MIN_T][BUTTON_2_SHORT].next_state = DISPLAYING_MAX_H;
+    state_entry_table[DISPLAYING_MIN_T][BUTTON_2_SHORT].action = disp_max_h;
+    state_entry_table[DISPLAYING_MIN_T][BUTTON_1_SHORT].next_state = DISPLAYING_PRESSURE;
+    state_entry_table[DISPLAYING_MIN_T][BUTTON_1_SHORT].action = set_disp_to_press;
+    state_entry_table[DISPLAYING_MAX_H][BUTTON_2_SHORT].next_state = DISPLAYING_MIN_H;
+    state_entry_table[DISPLAYING_MAX_H][BUTTON_2_SHORT].action = disp_min_h;
+    state_entry_table[DISPLAYING_MAX_H][BUTTON_1_SHORT].next_state = DISPLAYING_PRESSURE;
+    state_entry_table[DISPLAYING_MAX_H][BUTTON_1_SHORT].action = set_disp_to_press;
+    state_entry_table[DISPLAYING_MIN_H][BUTTON_2_SHORT].next_state = DISPLAYING_MAX_P;
+    state_entry_table[DISPLAYING_MIN_H][BUTTON_2_SHORT].action = disp_max_p;
+    state_entry_table[DISPLAYING_MIN_H][BUTTON_1_SHORT].next_state = DISPLAYING_PRESSURE;
+    state_entry_table[DISPLAYING_MIN_H][BUTTON_1_SHORT].action = set_disp_to_press;
+    
+    
     // Display Task Array
+    // These are called in the loop to refresh the display
+    // Every 5 seconds
+    
     state_display_fn_array[DISPLAYING_PRESSURE] = display_pressure_state;
     state_display_fn_array[DISPLAYING_HEIGHT] = display_altitude_state;
     state_display_fn_array[SETUP_MODE_BLINK] = display_all_blink_digits;
     state_display_fn_array[SETUP_MODE_DIGIT] = blink_individual_digit;
     state_display_fn_array[DISPLAYING_MAX_P] = disp_max_p;
+    state_display_fn_array[DISPLAYING_MIN_P] = disp_min_p;
+    state_display_fn_array[DISPLAYING_MAX_T] = disp_max_t;
+    state_display_fn_array[DISPLAYING_MIN_T] = disp_min_t;
+    state_display_fn_array[DISPLAYING_MAX_H] = disp_max_h;
+    state_display_fn_array[DISPLAYING_MIN_H] = disp_min_h;
     
 }
 ////////////////////////////////////////////////////////////////////
@@ -225,20 +269,7 @@ void set_alt_offset() {
     display_altitude_state();
 }
 
-void disp_max_p() {
-  LCD.clear();
-  LCD.setCursor(0,0);
-  LCD.print("MX P ");
-  LCD.print(max_press);
-  LCD.setCursor(0,1);
-  LCD.print(" At:");
-  time_t tmp = now() - max_p_time;
-  LCD.print(hour(tmp));
-  LCD.print(":");
-  LCD.print(minute(tmp));
-  LCD.print(":");
-  LCD.print(second(tmp));
-}
+
 ///////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////
 // State Display Funcitons //
@@ -250,6 +281,18 @@ void display_pressure_state(void) {
     print_dewpoint(dewPoint(dht_temp, humidity));
     print_temparature(temp);
     print_relative_humidity(humidity);
+    print_pressure_trend();
+}
+
+void print_pressure_trend() {
+  LCD.setCursor(12,1);
+  if (press_trend == 1) {
+    LCD.print("+");
+  } else if (press_trend == -1) {
+    LCD.print("-");
+  } else {
+    LCD.print("=");
+  }
 }
 void display_altitude_state(void) {
     LCD.clear();
@@ -304,6 +347,9 @@ void setup () {
     MsTimer2::start();
     read_alt_setting_from_eeprom();
     setTime((time_t) 0);
+    for (int i = 0; i < MAX_PRESS_HISTORY; i++) {
+      past_pressure_values[i] = -1;
+    }
 }
 void loop() {
     process_button_inputs();
@@ -401,6 +447,65 @@ void print_relative_humidity(float humid) {
     //LCD.print("RH:" );
     LCD.print(humid,1);
     LCD.print("%");
+}
+
+void disp_max_p() {
+  LCD.clear();
+  LCD.setCursor(0,0);
+  LCD.print("MX P ");
+  LCD.print(max_press);
+  print_ext_time(max_p_time);
+}
+
+void disp_min_p() {
+  LCD.clear();
+  LCD.setCursor(0,0);
+  LCD.print("MN P ");
+  LCD.print(min_press);
+  print_ext_time(min_p_time);
+}
+
+void disp_max_t() {
+  LCD.clear();
+  LCD.setCursor(0,0);
+  LCD.print("MX T ");
+  LCD.print(max_temp);
+  print_ext_time(max_t_time);
+}
+
+void disp_min_t() {
+  LCD.clear();
+  LCD.setCursor(0,0);
+  LCD.print("MN T ");
+  LCD.print(min_temp);
+  print_ext_time(min_t_time);
+}
+
+void disp_max_h() {
+  LCD.clear();
+  LCD.setCursor(0,0);
+  LCD.print("MX H ");
+  LCD.print(max_humidity);
+  print_ext_time(max_h_time);
+}
+
+void disp_min_h() {
+  LCD.clear();
+  LCD.setCursor(0,0);
+  LCD.print("MN H ");
+  LCD.print(min_humidity);
+  print_ext_time(min_h_time);
+}
+
+void print_ext_time(time_t t) {
+  LCD.setCursor(0,1);
+  LCD.print(" At:");
+  time_t tmp = now() - t;
+  LCD.print(hour(tmp));
+  LCD.print(":");
+  LCD.print(minute(tmp));
+  LCD.print(":");
+  LCD.print(second(tmp));
 }
 //////////////////////////////////////////////////////////////////////////
 // Sensor Functions //
@@ -646,6 +751,44 @@ void read_sensor_data() {
           min_h_time = now();
         }
         
+        char delta_ctr = 0;
+        
+        //Serial.print("----\n");
+        for (int i = 0; i < MAX_PRESS_HISTORY - 1; i++) {
+          //Serial.print(past_pressure_values[MAX_PRESS_HISTORY - i - 2]);
+          //Serial.print("\n");
+          //Serial.print(past_pressure_values[MAX_PRESS_HISTORY - i - 1]);
+          //Serial.print("\n");
+          if ((past_pressure_values[MAX_PRESS_HISTORY - i - 2] - past_pressure_values[MAX_PRESS_HISTORY - i - 1]) > 0.1) {
+            delta_ctr += 1;
+          } else if ((past_pressure_values[MAX_PRESS_HISTORY - i - 2] - past_pressure_values[MAX_PRESS_HISTORY - i - 1]) < -0.1){
+            delta_ctr += -1;
+          }
+          past_pressure_values[MAX_PRESS_HISTORY - i - 1] = past_pressure_values[MAX_PRESS_HISTORY - i - 2];
+        }
+        //Serial.print(pressure);
+        //Serial.print("\n");
+        //Serial.print(past_pressure_values[0]);
+        //Serial.print("\n");
+        
+        if (pressure > past_pressure_values[0]) {
+            delta_ctr += 1;
+        } else {
+            delta_ctr += -1;
+        }
+        //Serial.print((int)delta_ctr);
+        //Serial.print("\n");
+        
+        if (delta_ctr > (0.8 * MAX_PRESS_HISTORY)) {
+          press_trend = 1;
+        } else if (delta_ctr < (0- 0.8 * MAX_PRESS_HISTORY)) {
+          press_trend = -1;
+        } else {
+          press_trend = 0;
+        }
+        
+        //Serial.print("----");
+        past_pressure_values[0] = pressure;
         //Serial.print("test");
         print_data_to_serial(pressure, temp, humidity);
     }
